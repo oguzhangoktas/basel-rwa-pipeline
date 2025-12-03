@@ -1,0 +1,63 @@
+# Basel RWA DAG Configuration
+
+dag:
+  name: basel_rwa_daily_calculation
+  schedule: "0 2 * * *"  # 2 AM daily
+  max_active_runs: 1
+  catchup: false
+  tags:
+    - basel
+    - risk
+    - regulatory
+
+sla:
+  target_hours: 3
+  warning_threshold_hours: 2.5
+
+retry:
+  count: 2
+  delay_minutes: 10
+
+aws:
+  region: us-east-1
+  s3_bucket: bank-datalake
+  glue_role: GlueExecutionRole
+
+glue_jobs:
+  stage1:
+    name: rwa_stage1_standardization
+    workers: 50
+    worker_type: G.2X
+    timeout_minutes: 120
+  
+  stage2:
+    name: rwa_stage2_calculation
+    workers: 100
+    worker_type: G.2X
+    timeout_minutes: 180
+  
+  stage3:
+    name: rwa_stage3_aggregation
+    workers: 20
+    worker_type: G.1X
+    timeout_minutes: 60
+
+redshift:
+  cluster: rwa-cluster
+  database: prod
+  schema: risk
+  tables:
+    - rwa_calculations
+    - rwa_summary
+
+validation:
+  row_count_tolerance_pct: 20
+  reconciliation_tolerance_pct: 0.01
+  data_quality_threshold_pct: 99.0
+
+alerting:
+  slack_channel: "#data-eng-alerts"
+  pagerduty_service_key: "${PAGERDUTY_KEY}"
+  email_recipients:
+    - data-team@bank.com
+    - risk-team@bank.com
