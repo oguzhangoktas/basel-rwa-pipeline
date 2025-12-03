@@ -360,7 +360,7 @@ All data used is synthetically generated and does not represent any real financi
 **Oğuzhan Göktaş**
 - LinkedIn: https://www.linkedin.com/in/oguzhan-goktas/
 - Email: oguzhangoktas22@gmail.com
-- Portfolio: https://www.linkedin.com/in/oguzhan-goktas/
+- Portfolio: https://github.com/oguzhangoktas
 
 ## 📄 License
 
