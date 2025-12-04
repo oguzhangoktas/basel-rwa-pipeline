@@ -1,0 +1,56 @@
+name: ‚úÖ Validation
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Validate project structure
+      run: |
+        echo "Ì¥ç Validating Basel RWA Pipeline structure..."
+        test -f README.md && echo "‚úÖ README.md exists" || exit 1
+        test -f requirements.txt && echo "‚úÖ requirements.txt exists" || exit 1
+        test -f LICENSE && echo "‚úÖ LICENSE exists" || exit 1
+        test -f ARCHITECTURE.md && echo "‚úÖ ARCHITECTURE.md exists" || exit 1
+        test -d src && echo "‚úÖ src/ directory exists" || exit 1
+        test -d docs && echo "‚úÖ docs/ directory exists" || exit 1
+        test -d sql && echo "‚úÖ sql/ directory exists" || exit 1
+        test -d sample_data && echo "‚úÖ sample_data/ directory exists" || exit 1
+        echo ""
+        echo "‚úÖ All structure validations passed!"
+    
+    - name: Count source files
+      run: |
+        echo "Ì≥ä Project Statistics:"
+        echo "---"
+        PY_COUNT=$(find src -name "*.py" | wc -l)
+        echo "Python files: $PY_COUNT"
+        
+        SQL_COUNT=$(find sql -name "*.sql" 2>/dev/null | wc -l)
+        echo "SQL files: $SQL_COUNT"
+        
+        MD_COUNT=$(find docs -name "*.md" 2>/dev/null | wc -l)
+        echo "Documentation files: $MD_COUNT"
+        echo "---"
+        
+        [ $PY_COUNT -gt 5 ] && echo "‚úÖ Sufficient Python modules" || exit 1
+        [ $SQL_COUNT -gt 0 ] && echo "‚úÖ SQL schemas present" || exit 1
+        [ $MD_COUNT -gt 0 ] && echo "‚úÖ Documentation complete" || exit 1
+    
+    - name: Verify critical files
+      run: |
+        echo "Ì¥ç Checking critical implementation files..."
+        test -f src/glue_jobs/stage2_calculation.py && echo "‚úÖ RWA calculation logic exists" || exit 1
+        test -f src/utils/data_quality.py && echo "‚úÖ Data quality framework exists" || exit 1
+        test -f sql/redshift/create_tables.sql && echo "‚úÖ Redshift DDL exists" || exit 1
+        test -f sample_data/generate_sample_data.py && echo "‚úÖ Sample data generator exists" || exit 1
+        echo ""
+        echo "Ìæâ All validations passed! Project structure is complete."
