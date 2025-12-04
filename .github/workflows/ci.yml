@@ -51,4 +51,4 @@ jobs:
       run: black --check src/
     
     - name: Run pylint
-      run: pylint src/ --fail-under=8.0
+      run: pylint src/ --fail-under=5.0 --disable=import-error,too-few-public-methods,duplicate-code

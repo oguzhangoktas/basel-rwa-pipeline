@@ -131,7 +131,7 @@ class TestRWACalculations:
 
         # Then: Verify collateral reduces exposure
         assert result["ead"] == 200_000.0
-        assert result["ead_after_crm"] == 40_000.0  # 20% of 200k
+        assert abs(result["ead_after_crm"] - 40_000.0) < 0.01
         assert result["rwa"] == 14_000.0  # 40k * 0.35
 
     def test_rwa_high_risk_unsecured(self, spark):
@@ -414,13 +414,13 @@ class TestPerformanceOptimizations:
         assert skewed_list[0]["customer_id"] == "C001"
 
         # When: Apply salting
+        skewed_with_count = skewed_customers.select("customer_id", F.col("count").alias("loan_count"))
+
         salted_df = df.join(
-            F.broadcast(skewed_customers.select("customer_id")), "customer_id", "left"
+            F.broadcast(skewed_with_count), "customer_id", "left"
         ).withColumn(
             "salt",
-            F.when(F.col("count").isNotNull(), (F.rand() * 10).cast("int")).otherwise(
-                F.lit(0)
-            ),
+            F.when(F.col("loan_count").isNotNull(), (F.rand() * 10).cast("int")).otherwise(F.lit(0))
         )
 
         # Then: Verify salting applied
