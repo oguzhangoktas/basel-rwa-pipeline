@@ -11,14 +11,15 @@ from pyspark.sql import SparkSession
 @pytest.fixture(scope="session")
 def spark_session():
     """Create Spark session for tests"""
-    spark = SparkSession.builder \
-        .appName("RWA-Tests") \
-        .master("local[2]") \
-        .config("spark.sql.shuffle.partitions", "2") \
+    spark = (
+        SparkSession.builder.appName("RWA-Tests")
+        .master("local[2]")
+        .config("spark.sql.shuffle.partitions", "2")
         .getOrCreate()
-    
+    )
+
     yield spark
-    
+
     spark.stop()
 
 
@@ -31,13 +32,13 @@ def sample_loan_data():
             "customer_id": "C001",
             "outstanding_balance": 100000.0,
             "asset_class": "CORPORATE_LARGE",
-            "rating": "AAA"
+            "rating": "AAA",
         },
         {
             "loan_id": "L002",
             "customer_id": "C002",
             "outstanding_balance": 50000.0,
             "asset_class": "RETAIL_MORTGAGE",
-            "rating": "BBB"
-        }
+            "rating": "BBB",
+        },
     ]

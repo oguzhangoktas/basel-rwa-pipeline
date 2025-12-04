@@ -20,14 +20,16 @@ def get_spark_config() -> Dict[str, str]:
         "spark.sql.adaptive.coalescePartitions.enabled": "true",
         "spark.sql.adaptive.skewJoin.enabled": "true",
         "spark.sql.shuffle.partitions": "400",
-        "spark.sql.autoBroadcastJoinThreshold": "50MB"
+        "spark.sql.autoBroadcastJoinThreshold": "50MB",
     }
 
 
-def optimize_dataframe_partitions(df, partition_columns: List[str], num_partitions: int = 200):
+def optimize_dataframe_partitions(
+    df, partition_columns: List[str], num_partitions: int = 200
+):
     """
     Repartition DataFrame for optimal processing
-    
+
     Args:
         df: Input DataFrame
         partition_columns: Columns to partition by
