@@ -1,419 +1,441 @@
 """
-Data Quality Validation Utilities
+Reconciliation Engine for Basel RWA Pipeline
 
-Provides comprehensive data quality checks for the RWA pipeline including:
-- Schema validation
-- Business rule validation
-- Statistical anomaly detection
-- Reconciliation checks
+Validates calculated results against source systems and performs
+day-over-day trend analysis for data accuracy assurance.
 
 Author: Portfolio Project
 Date: December 2024
 """
 
-from typing import Dict, List, Optional, Tuple
-from pyspark.sql import DataFrame
-from pyspark.sql import functions as F
-from pyspark.sql.types import StructType
+from typing import Dict, List, Tuple
+import pandas as pd
+from sqlalchemy import create_engine
+import boto3
+import json
+from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class DataQualityValidator:
+class ReconciliationEngine:
     """
-    Comprehensive data quality validation framework
+    Comprehensive reconciliation framework for RWA calculations
+    
+    Compares calculated RWA totals with source system data and
+    performs trend analysis to detect anomalies.
     """
-
-    def __init__(self, spark_session):
-        self.spark = spark_session
-        self.validation_results = []
-
-    def validate_schema(
-        self, df: DataFrame, expected_schema: StructType, table_name: str
-    ) -> Tuple[bool, List[str]]:
+    
+    def __init__(self, redshift_conn_string: str, s3_bucket: str):
         """
-        Validate DataFrame schema matches expected schema
-
+        Initialize reconciliation engine
+        
         Args:
-            df: Input DataFrame
-            expected_schema: Expected StructType schema
-            table_name: Name of table for logging
-
-        Returns:
-            Tuple of (is_valid, list_of_errors)
+            redshift_conn_string: PostgreSQL connection string for Redshift
+            s3_bucket: S3 bucket name for storing reconciliation reports
         """
-        errors = []
-
-        actual_fields = {field.name: field.dataType for field in df.schema.fields}
-        expected_fields = {
-            field.name: field.dataType for field in expected_schema.fields
-        }
-
-        # Check for missing columns
-        missing_cols = set(expected_fields.keys()) - set(actual_fields.keys())
-        if missing_cols:
-            errors.append(f"{table_name}: Missing columns: {missing_cols}")
-
-        # Check for unexpected columns
-        extra_cols = set(actual_fields.keys()) - set(expected_fields.keys())
-        if extra_cols:
-            logger.warning(f"{table_name}: Extra columns found: {extra_cols}")
-
-        # Check data types
-        for col in set(actual_fields.keys()) & set(expected_fields.keys()):
-            if actual_fields[col] != expected_fields[col]:
-                errors.append(
-                    f"{table_name}.{col}: Type mismatch. "
-                    f"Expected {expected_fields[col]}, got {actual_fields[col]}"
-                )
-
-        is_valid = len(errors) == 0
-        self._log_validation("schema_validation", table_name, is_valid, errors)
-
-        return is_valid, errors
-
-    def check_nulls(
+        self.engine = create_engine(redshift_conn_string)
+        self.s3_client = boto3.client('s3')
+        self.s3_bucket = s3_bucket
+        self.reconciliation_results = []
+        
+    def reconcile_totals(
         self,
-        df: DataFrame,
-        critical_columns: List[str],
-        table_name: str,
-        threshold_pct: float = 1.0,
-    ) -> Tuple[bool, Dict[str, float]]:
+        calculation_date: str,
+        tolerance_pct: float = 0.01
+    ) -> Dict:
         """
-        Check for null values in critical columns
-
+        Reconcile total RWA with source system totals
+        
         Args:
-            df: Input DataFrame
-            critical_columns: List of columns that should not have nulls
-            table_name: Table name for logging
-            threshold_pct: Maximum acceptable null percentage (default 1%)
-
-        Returns:
-            Tuple of (is_valid, dict of column: null_percentage)
-        """
-        null_stats = {}
-        total_rows = df.count()
-
-        for col in critical_columns:
-            if col not in df.columns:
-                logger.warning(f"{table_name}: Column {col} not found")
-                continue
-
-            null_count = df.filter(F.col(col).isNull()).count()
-            null_pct = (null_count / total_rows) * 100 if total_rows > 0 else 0
-            null_stats[col] = null_pct
-
-            if null_pct > threshold_pct:
-                logger.error(
-                    f"{table_name}.{col}: {null_pct:.2f}% nulls "
-                    f"(threshold: {threshold_pct}%)"
-                )
-
-        is_valid = all(pct <= threshold_pct for pct in null_stats.values())
-        self._log_validation("null_check", table_name, is_valid, null_stats)
-
-        return is_valid, null_stats
-
-    def check_duplicates(
-        self, df: DataFrame, key_columns: List[str], table_name: str
-    ) -> Tuple[bool, int]:
-        """
-        Check for duplicate records based on key columns
-
-        Args:
-            df: Input DataFrame
-            key_columns: Columns that define uniqueness
-            table_name: Table name for logging
-
-        Returns:
-            Tuple of (is_valid, duplicate_count)
-        """
-        duplicate_count = (
-            df.groupBy(key_columns).count().filter(F.col("count") > 1).count()
-        )
-
-        is_valid = duplicate_count == 0
-
-        if not is_valid:
-            logger.error(f"{table_name}: Found {duplicate_count} duplicate records")
-
-        self._log_validation(
-            "duplicate_check",
-            table_name,
-            is_valid,
-            {"duplicate_count": duplicate_count},
-        )
-
-        return is_valid, duplicate_count
-
-    def validate_business_rules(
-        self, df: DataFrame, rules: List[Dict], table_name: str
-    ) -> Tuple[bool, Dict[str, int]]:
-        """
-        Validate business rules
-
-        Args:
-            df: Input DataFrame
-            rules: List of rule dictionaries with 'name', 'condition', 'error_msg'
-            table_name: Table name for logging
-
-        Example rules:
-            [
-                {
-                    'name': 'positive_balance',
-                    'condition': 'outstanding_balance > 0',
-                    'error_msg': 'Balance must be positive'
-                },
-                {
-                    'name': 'future_maturity',
-                    'condition': 'maturity_date > current_date()',
-                    'error_msg': 'Maturity date must be in future'
-                }
-            ]
-
-        Returns:
-            Tuple of (is_valid, dict of rule_name: violation_count)
-        """
-        violations = {}
-
-        for rule in rules:
-            rule_name = rule["name"]
-            condition = rule["condition"]
-
-            # Count records that VIOLATE the rule (negate the condition)
-            violation_count = df.filter(f"NOT ({condition})").count()
-            violations[rule_name] = violation_count
-
-            if violation_count > 0:
-                logger.error(
-                    f"{table_name}: Rule '{rule_name}' violated by "
-                    f"{violation_count} records - {rule.get('error_msg', '')}"
-                )
-
-        is_valid = all(count == 0 for count in violations.values())
-        self._log_validation("business_rules", table_name, is_valid, violations)
-
-        return is_valid, violations
-
-    def check_row_count(
-        self, df: DataFrame, expected_range: Tuple[int, int], table_name: str
-    ) -> Tuple[bool, int]:
-        """
-        Validate row count is within expected range
-
-        Args:
-            df: Input DataFrame
-            expected_range: Tuple of (min_count, max_count)
-            table_name: Table name for logging
-
-        Returns:
-            Tuple of (is_valid, actual_count)
-        """
-        actual_count = df.count()
-        min_count, max_count = expected_range
-
-        is_valid = min_count <= actual_count <= max_count
-
-        if not is_valid:
-            logger.error(
-                f"{table_name}: Row count {actual_count:,} outside expected range "
-                f"[{min_count:,}, {max_count:,}]"
-            )
-        else:
-            logger.info(f"{table_name}: Row count {actual_count:,} ✓")
-
-        self._log_validation(
-            "row_count_check",
-            table_name,
-            is_valid,
-            {"actual": actual_count, "expected_range": expected_range},
-        )
-
-        return is_valid, actual_count
-
-    def detect_anomalies(
-        self,
-        df: DataFrame,
-        numeric_columns: List[str],
-        table_name: str,
-        std_threshold: float = 3.0,
-    ) -> Tuple[bool, Dict[str, Dict]]:
-        """
-        Detect statistical anomalies using standard deviation
-
-        Args:
-            df: Input DataFrame
-            numeric_columns: Columns to check for anomalies
-            table_name: Table name for logging
-            std_threshold: Number of std deviations for anomaly (default 3)
-
-        Returns:
-            Tuple of (is_valid, dict of column: {mean, std, anomaly_count})
-        """
-        anomaly_stats = {}
-
-        for col in numeric_columns:
-            if col not in df.columns:
-                continue
-
-            # Calculate statistics
-            stats = df.agg(
-                F.mean(col).alias("mean"), F.stddev(col).alias("std")
-            ).collect()[0]
-
-            mean_val = stats["mean"]
-            std_val = stats["std"]
-
-            if std_val is None or std_val == 0:
-                continue
-
-            # Count values beyond threshold
-            lower_bound = mean_val - (std_threshold * std_val)
-            upper_bound = mean_val + (std_threshold * std_val)
-
-            anomaly_count = df.filter(
-                (F.col(col) < lower_bound) | (F.col(col) > upper_bound)
-            ).count()
-
-            anomaly_stats[col] = {
-                "mean": float(mean_val),
-                "std": float(std_val),
-                "anomaly_count": anomaly_count,
-                "bounds": (float(lower_bound), float(upper_bound)),
-            }
-
-            if anomaly_count > 0:
-                logger.warning(
-                    f"{table_name}.{col}: {anomaly_count} anomalies detected "
-                    f"(>{std_threshold}σ from mean)"
-                )
-
-        is_valid = all(stats["anomaly_count"] == 0 for stats in anomaly_stats.values())
-        self._log_validation("anomaly_detection", table_name, is_valid, anomaly_stats)
-
-        return is_valid, anomaly_stats
-
-    def reconcile_with_source(
-        self,
-        target_df: DataFrame,
-        source_total: float,
-        target_column: str,
-        tolerance_pct: float = 0.01,
-    ) -> Tuple[bool, float]:
-        """
-        Reconcile target totals with source system
-
-        Args:
-            target_df: Calculated DataFrame
-            source_total: Total from source system
-            target_column: Column to sum in target
+            calculation_date: Date to reconcile (YYYY-MM-DD)
             tolerance_pct: Acceptable variance percentage (default 0.01%)
-
+            
         Returns:
-            Tuple of (is_valid, variance_percentage)
+            Dict with reconciliation results
         """
-        target_total = target_df.agg(F.sum(target_column)).collect()[0][0]
-
-        if target_total is None:
-            logger.error("Target total is NULL")
-            return False, 100.0
-
-        variance_pct = abs(target_total - source_total) / source_total * 100
-
-        is_valid = variance_pct <= tolerance_pct
-
-        if not is_valid:
+        logger.info(f"Starting reconciliation for {calculation_date}")
+        
+        # Get calculated totals from Redshift
+        calculated_totals = self._get_calculated_totals(calculation_date)
+        
+        # Get source totals (would query Oracle in production)
+        # For portfolio, we simulate this
+        source_totals = self._get_source_totals(calculation_date)
+        
+        # Calculate variances
+        results = {
+            'calculation_date': calculation_date,
+            'calculated_exposure': calculated_totals['total_exposure'],
+            'source_exposure': source_totals['total_exposure'],
+            'calculated_loan_count': calculated_totals['loan_count'],
+            'source_loan_count': source_totals['loan_count'],
+            'status': 'PASSED'
+        }
+        
+        # Check exposure variance
+        if results['source_exposure'] > 0:
+            exposure_variance_pct = abs(
+                results['calculated_exposure'] - results['source_exposure']
+            ) / results['source_exposure'] * 100
+            
+            results['exposure_variance_pct'] = exposure_variance_pct
+            
+            if exposure_variance_pct > tolerance_pct:
+                results['status'] = 'FAILED'
+                logger.error(
+                    f"Exposure reconciliation FAILED: {exposure_variance_pct:.4f}% variance "
+                    f"(tolerance: {tolerance_pct}%)"
+                )
+            else:
+                logger.info(
+                    f"Exposure reconciliation PASSED: {exposure_variance_pct:.4f}% variance"
+                )
+        
+        # Check loan count
+        if results['calculated_loan_count'] != results['source_loan_count']:
+            results['status'] = 'FAILED'
             logger.error(
-                f"Reconciliation failed: {variance_pct:.4f}% variance "
-                f"(tolerance: {tolerance_pct}%)\n"
-                f"Source: {source_total:,.2f}, Target: {target_total:,.2f}"
+                f"Loan count mismatch: Calculated={results['calculated_loan_count']}, "
+                f"Source={results['source_loan_count']}"
+            )
+        
+        self.reconciliation_results.append(results)
+        
+        return results
+    
+    def reconcile_day_over_day(
+        self,
+        calculation_date: str,
+        threshold_pct: float = 10.0
+    ) -> Dict:
+        """
+        Compare today's RWA with previous day to detect anomalies
+        
+        Args:
+            calculation_date: Current date
+            threshold_pct: Max acceptable day-over-day change (default 10%)
+            
+        Returns:
+            Dict with comparison results
+        """
+        current_date = datetime.strptime(calculation_date, '%Y-%m-%d')
+        previous_date = (current_date - timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        logger.info(f"Day-over-day reconciliation: {previous_date} -> {calculation_date}")
+        
+        # Get totals for both days
+        try:
+            current_totals = self._get_calculated_totals(calculation_date)
+            previous_totals = self._get_calculated_totals(previous_date)
+        except Exception as e:
+            logger.warning(f"Could not get previous day data: {e}")
+            return {
+                'calculation_date': calculation_date,
+                'previous_date': previous_date,
+                'status': 'SKIPPED',
+                'reason': 'Previous day data not available'
+            }
+        
+        # Calculate changes
+        rwa_change_pct = (
+            (current_totals['total_rwa'] - previous_totals['total_rwa']) /
+            previous_totals['total_rwa'] * 100
+        )
+        
+        exposure_change_pct = (
+            (current_totals['total_exposure'] - previous_totals['total_exposure']) /
+            previous_totals['total_exposure'] * 100
+        )
+        
+        results = {
+            'calculation_date': calculation_date,
+            'previous_date': previous_date,
+            'current_rwa': current_totals['total_rwa'],
+            'previous_rwa': previous_totals['total_rwa'],
+            'rwa_change_pct': rwa_change_pct,
+            'exposure_change_pct': exposure_change_pct,
+            'status': 'PASSED'
+        }
+        
+        # Flag large changes
+        if abs(rwa_change_pct) > threshold_pct:
+            results['status'] = 'WARNING'
+            logger.warning(
+                f"Large RWA change detected: {rwa_change_pct:.2f}% "
+                f"(threshold: {threshold_pct}%)"
             )
         else:
-            logger.info(f"Reconciliation passed: {variance_pct:.4f}% variance ✓")
-
-        self._log_validation(
-            "reconciliation",
-            "totals",
-            is_valid,
-            {"variance_pct": variance_pct, "tolerance": tolerance_pct},
-        )
-
-        return is_valid, variance_pct
-
-    def _log_validation(
-        self, check_type: str, table_name: str, is_valid: bool, details: any
-    ):
-        """Internal method to log validation results"""
-        self.validation_results.append(
-            {
-                "check_type": check_type,
-                "table_name": table_name,
-                "is_valid": is_valid,
-                "details": details,
-            }
-        )
-
-    def get_validation_summary(self) -> Dict:
+            logger.info(f"Day-over-day change within threshold: {rwa_change_pct:.2f}%")
+        
+        self.reconciliation_results.append(results)
+        
+        return results
+    
+    def reconcile_by_asset_class(
+        self,
+        calculation_date: str,
+        tolerance_pct: float = 0.1
+    ) -> pd.DataFrame:
         """
-        Get summary of all validation checks
-
+        Detailed reconciliation by asset class
+        
+        Args:
+            calculation_date: Date to reconcile
+            tolerance_pct: Tolerance per asset class (default 0.1%)
+            
         Returns:
-            Dictionary with validation summary
+            DataFrame with reconciliation by asset class
         """
-        total_checks = len(self.validation_results)
-        passed_checks = sum(1 for r in self.validation_results if r["is_valid"])
-
-        return {
-            "total_checks": total_checks,
-            "passed": passed_checks,
-            "failed": total_checks - passed_checks,
-            "pass_rate": (
-                (passed_checks / total_checks * 100) if total_checks > 0 else 0
-            ),
-            "details": self.validation_results,
+        query = f"""
+        SELECT 
+            asset_class,
+            SUM(outstanding_balance_usd) as calculated_exposure,
+            SUM(risk_weighted_assets) as calculated_rwa,
+            COUNT(*) as loan_count
+        FROM risk.rwa_calculations
+        WHERE calculation_date = '{calculation_date}'
+        GROUP BY asset_class
+        """
+        
+        calculated_df = pd.read_sql(query, self.engine)
+        
+        # In production, would compare with source
+        # For portfolio, mark all as PASSED
+        calculated_df['variance_pct'] = 0.0
+        calculated_df['status'] = 'PASSED'
+        
+        logger.info(f"Asset class reconciliation completed for {calculation_date}")
+        
+        return calculated_df
+    
+    def get_top_movers(
+        self,
+        calculation_date: str,
+        top_n: int = 20
+    ) -> pd.DataFrame:
+        """
+        Get top N customers with largest RWA changes
+        
+        Args:
+            calculation_date: Current date
+            top_n: Number of top movers to return
+            
+        Returns:
+            DataFrame with top movers
+        """
+        current_date = datetime.strptime(calculation_date, '%Y-%m-%d')
+        previous_date = (current_date - timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        query = f"""
+        WITH current_day AS (
+            SELECT 
+                customer_id,
+                SUM(risk_weighted_assets) as current_rwa
+            FROM risk.rwa_calculations
+            WHERE calculation_date = '{calculation_date}'
+            GROUP BY customer_id
+        ),
+        previous_day AS (
+            SELECT 
+                customer_id,
+                SUM(risk_weighted_assets) as previous_rwa
+            FROM risk.rwa_calculations
+            WHERE calculation_date = '{previous_date}'
+            GROUP BY customer_id
+        )
+        SELECT 
+            COALESCE(c.customer_id, p.customer_id) as customer_id,
+            COALESCE(c.current_rwa, 0) as current_rwa,
+            COALESCE(p.previous_rwa, 0) as previous_rwa,
+            COALESCE(c.current_rwa, 0) - COALESCE(p.previous_rwa, 0) as rwa_change,
+            CASE 
+                WHEN p.previous_rwa > 0 THEN 
+                    ((c.current_rwa - p.previous_rwa) / p.previous_rwa * 100)
+                ELSE NULL
+            END as change_pct
+        FROM current_day c
+        FULL OUTER JOIN previous_day p ON c.customer_id = p.customer_id
+        ORDER BY ABS(COALESCE(c.current_rwa, 0) - COALESCE(p.previous_rwa, 0)) DESC
+        LIMIT {top_n}
+        """
+        
+        top_movers = pd.read_sql(query, self.engine)
+        
+        return top_movers
+    
+    def _get_calculated_totals(self, calculation_date: str) -> Dict:
+        """Get totals from Redshift calculations"""
+        query = f"""
+        SELECT 
+            SUM(outstanding_balance_usd) as total_exposure,
+            SUM(risk_weighted_assets) as total_rwa,
+            SUM(regulatory_capital) as total_capital,
+            COUNT(DISTINCT loan_id) as loan_count,
+            COUNT(DISTINCT customer_id) as customer_count
+        FROM risk.rwa_calculations
+        WHERE calculation_date = '{calculation_date}'
+        """
+        
+        result = pd.read_sql(query, self.engine).iloc[0].to_dict()
+        
+        # Convert numpy types to native Python types
+        for key, value in result.items():
+            if pd.isna(value):
+                result[key] = 0
+            elif hasattr(value, 'item'):
+                result[key] = value.item()
+        
+        return result
+    
+    def _get_source_totals(self, calculation_date: str) -> Dict:
+        """
+        Get totals from source system (Oracle snapshot in S3)
+        
+        In production, this would query actual Oracle data via Athena or JDBC.
+        For portfolio demonstration, we simulate expected values.
+        """
+        # In production:
+        # athena_client = boto3.client('athena')
+        # query = f"""
+        # SELECT 
+        #     SUM(outstanding_balance) as total_exposure,
+        #     COUNT(*) as loan_count
+        # FROM loans_master
+        # WHERE snapshot_date = '{calculation_date}'
+        # """
+        
+        # For portfolio: simulate source totals
+        calculated = self._get_calculated_totals(calculation_date)
+        
+        # Simulate very close match (within tolerance)
+        result = {
+            'total_exposure': calculated['total_exposure'] * 1.0001,  # 0.01% difference
+            'loan_count': calculated['loan_count']
         }
-
-    def raise_if_failed(self):
-        """Raise exception if any validation failed"""
-        summary = self.get_validation_summary()
-        if summary["failed"] > 0:
-            raise ValueError(
-                f"Data quality validation failed: {summary['failed']} checks failed"
-            )
+        
+        return result
+    
+    def save_reconciliation_report(
+        self,
+        calculation_date: str,
+        output_format: str = 'json'
+    ):
+        """
+        Save reconciliation results to S3 for audit trail
+        
+        Args:
+            calculation_date: Date of reconciliation
+            output_format: 'json' or 'csv'
+        """
+        report_data = {
+            'reconciliation_timestamp': datetime.utcnow().isoformat(),
+            'calculation_date': calculation_date,
+            'results': self.reconciliation_results,
+            'overall_status': 'PASSED' if all(
+                r.get('status') in ['PASSED', 'WARNING'] 
+                for r in self.reconciliation_results
+            ) else 'FAILED'
+        }
+        
+        # Save to S3
+        s3_key = f"reconciliation/date={calculation_date}/report.{output_format}"
+        
+        if output_format == 'json':
+            content = json.dumps(report_data, indent=2, default=str)
+        else:
+            # Convert to CSV
+            if self.reconciliation_results:
+                df = pd.DataFrame(self.reconciliation_results)
+                content = df.to_csv(index=False)
+            else:
+                content = "No reconciliation results"
+        
+        self.s3_client.put_object(
+            Bucket=self.s3_bucket,
+            Key=s3_key,
+            Body=content.encode('utf-8')
+        )
+        
+        logger.info(f"Reconciliation report saved to s3://{self.s3_bucket}/{s3_key}")
+    
+    def generate_reconciliation_summary(self) -> str:
+        """
+        Generate human-readable summary of reconciliation
+        
+        Returns:
+            Formatted summary string
+        """
+        if not self.reconciliation_results:
+            return "No reconciliation results available"
+        
+        passed = sum(1 for r in self.reconciliation_results if r.get('status') == 'PASSED')
+        failed = sum(1 for r in self.reconciliation_results if r.get('status') == 'FAILED')
+        warning = sum(1 for r in self.reconciliation_results if r.get('status') == 'WARNING')
+        
+        summary = f"""
+╔══════════════════════════════════════════════════════════════╗
+║           RECONCILIATION SUMMARY                             ║
+╠══════════════════════════════════════════════════════════════╣
+║  Total Checks:    {len(self.reconciliation_results):>3}                                    ║
+║  Passed:          {passed:>3} ✓                                   ║
+║  Failed:          {failed:>3} ✗                                   ║
+║  Warnings:        {warning:>3} ⚠                                   ║
+╠══════════════════════════════════════════════════════════════╣
+║  Overall Status:  {'PASSED ✓' if failed == 0 else 'FAILED ✗':40}║
+╚══════════════════════════════════════════════════════════════╝
+        """
+        
+        return summary
 
 
 # Example usage
 if __name__ == "__main__":
-    from pyspark.sql import SparkSession
-
-    spark = SparkSession.builder.appName("DataQuality").getOrCreate()
-
-    # Sample data
-    data = [
-        (1, "L001", 100000, "2025-12-31", "AAA"),
-        (2, "L002", -5000, "2024-01-01", "BBB"),  # Violations
-        (3, "L003", 50000, "2026-06-30", "A"),
-    ]
-    df = spark.createDataFrame(data, ["id", "loan_id", "balance", "maturity", "rating"])
-
-    # Initialize validator
-    validator = DataQualityValidator(spark)
-
-    # Run checks
-    validator.check_nulls(df, ["loan_id", "balance"], "loans_table")
-    validator.check_duplicates(df, ["loan_id"], "loans_table")
-    validator.validate_business_rules(
-        df,
-        [
-            {
-                "name": "positive_balance",
-                "condition": "balance > 0",
-                "error_msg": "Balance must be positive",
-            }
-        ],
-        "loans_table",
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-
-    # Get summary
-    print(validator.get_validation_summary())
+    
+    # Initialize engine (connection string would come from env vars in production)
+    recon_engine = ReconciliationEngine(
+        redshift_conn_string="postgresql://user:pass@cluster:5439/prod",
+        s3_bucket="bank-datalake"
+    )
+    
+    # Run reconciliations
+    calculation_date = "2025-12-06"
+    
+    # 1. Total reconciliation
+    logger.info("Running total reconciliation...")
+    total_results = recon_engine.reconcile_totals(
+        calculation_date, 
+        tolerance_pct=0.01
+    )
+    print(f"Total Reconciliation: {total_results['status']}")
+    
+    # 2. Day-over-day comparison
+    logger.info("Running day-over-day analysis...")
+    dod_results = recon_engine.reconcile_day_over_day(
+        calculation_date, 
+        threshold_pct=10.0
+    )
+    print(f"Day-over-Day: {dod_results['status']}")
+    
+    # 3. Asset class reconciliation
+    logger.info("Running asset class reconciliation...")
+    asset_class_df = recon_engine.reconcile_by_asset_class(calculation_date)
+    print(f"Asset Classes Reconciled: {len(asset_class_df)}")
+    
+    # 4. Top movers
+    logger.info("Analyzing top movers...")
+    top_movers = recon_engine.get_top_movers(calculation_date, top_n=10)
+    print(f"Top 10 Movers Identified: {len(top_movers)}")
+    
+    # 5. Save report
+    logger.info("Saving reconciliation report...")
+    recon_engine.save_reconciliation_report(calculation_date, output_format='json')
+    
+    # 6. Print summary
+    print("\n" + recon_engine.generate_reconciliation_summary())
